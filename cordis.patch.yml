@@ -1,0 +1,7 @@
+- insert:
+    - id: compaction-select
+      name: dsh-compaction-select
+      config:
+        maxTokens: 8192
+        thresholdRatio: 0.65
+        compactionRetries: 0

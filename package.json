@@ -1,0 +1,26 @@
+{
+  "name": "dsh-compaction-select",
+  "version": "0.1.0",
+  "description": "Bounded, non-cumulative compaction checkpoints (fork of compaction-basic)",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib/index.js",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-compaction": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/cordis": "*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    }
+  }
+}
