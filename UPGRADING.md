@@ -50,6 +50,37 @@ Also check `~/.dsh/settings.yaml`: the 27B model's `reasoningEfforts` must
 still include `off: none`. The summarizer uses it to turn thinking off, and
 without it summarization falls back to the provider's default effort.
 
+### Agent output budget: `maxTokens = contextWindow - 4096`
+
+Every model entry in `~/.dsh/settings.yaml` sets `maxTokens` to
+`contextWindow - 4096` (27B UD-IQ4_XS: 32768 -> 28672; GSQ: 65536 -> 61440).
+That value is a ceiling, not the budget. pi-ai's `clampMaxTokensToContext`
+(`@earendil-works/pi-ai/dist/api/simple-options.js`) sends
+`min(maxTokens, contextWindow - estimateContextTokens(ctx) - 4096)` as
+`max_tokens` on every request. So output uses whatever context is left and
+prompt + output never exceeds the window.
+
+This retires the old manual invariant `threshold + maxTokens <= contextWindow`
+(the 09-19 value 11264 = 32768 - 0.65 * 32768). Nothing enforced it, and it
+went stale when `thresholdRatio` moved to 0.55. The fork's `maxTokens` above
+is the summarizer's budget and is unrelated.
+
+The session's `request/header` records the configured ceiling (28672), not
+the clamped value sent on the wire. After an upgrade, check that the clamp
+still exists and that `openai-completions` still goes through
+`buildBaseOptions`:
+
+```sh
+PA=$(readlink -f ~/.dsh/profiles/node_modules/@earendil-works/pi-ai)/dist
+grep -n 'CONTEXT_SAFETY_TOKENS =\|clampMaxTokensToContext(model' $PA/api/simple-options.js
+grep -n 'buildBaseOptions(model' $PA/api/openai-completions.js
+```
+
+If either line is gone, the ceiling becomes the literal `max_tokens` and a
+large prompt overflows the window. dsh reports that overflow as "Output
+token limit reached". In that case, go back to
+`maxTokens <= contextWindow - floor(thresholdRatio * contextWindow)`.
+
 ## 4. Restart dsh by PID
 
 The model servers (llama-server on 8092, imgproxy on 8091) are systemd user
