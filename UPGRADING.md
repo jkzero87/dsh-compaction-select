@@ -126,6 +126,25 @@ checkpoint merging stopped working.
 to disk right away. If `/compact #2` shows `NOT RUN`, click **Session log** in
 the UI (it flushes first) and scan again.
 
+## Switching the 27B model
+
+Only one 27B server runs on :8092 at a time (UD-IQ4_XS: `~/bin/start27b_mtp.sh`,
+`-c 32768`; GSQ: `~/bin/start_27b_gsq.sh`, `-c 65536`). Both entries stay under
+`llamacpp-local` in `settings.yaml`. When switching, these three must name the
+same model:
+
+1. **The running server**: its `-m` path and `-c`, which must equal that
+   entry's `contextWindow`. Check with
+   `tr '\0' ' ' < /proc/$(pgrep -f 'llama-server.*8092')/cmdline`.
+2. **`agent-default-model.model`** in `~/.dsh/settings.yaml`.
+3. **`summarizationModel`** in
+   `~/.dsh/.agent-presets/standard-light/agent.cordis.yml`.
+
+llama-server ignores the model name in the request, so a mismatch still gets
+answers. But dsh sizes budgets from the entry's `contextWindow`: if it's too
+large, requests overflow; if it's too small, context goes unused and the
+summarizer is fitted to the wrong window. Restart dsh after editing 2 or 3.
+
 ## Upstream internals the fork relies on
 
 If a step above fails, these are the first things to compare against the new
