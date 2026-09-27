@@ -1,7 +1,7 @@
 # dsh-compaction-select
 
-A fork of `@deepseek-ai/dsh-compaction-basic` for a local Qwen3.8-27B on a
-32k window. Each compaction produces one bounded checkpoint. Compared with
+A fork of `@deepseek-ai/dsh-compaction-basic` for a local Qwen3.8-27B (GSQ,
+65k window). Each compaction produces one bounded checkpoint. Compared with
 upstream:
 
 - the summarizer's output budget is fitted to the context window and to the
@@ -11,9 +11,23 @@ upstream:
   retried once, then rejected
 - earlier checkpoints merge into the next one instead of piling up
 - every compaction records its budget and diagnostics in the session log
+- the trigger can be sized by output reserve instead of a fixed ratio
 
 It's loaded by the `standard-light` preset as `dsh-compaction-select`. After
 any dsh upgrade, follow [UPGRADING.md](UPGRADING.md).
+
+## Trigger
+
+Upstream compacts at `contextWindow × thresholdRatio`. Set
+`outputReserveTokens` (and optionally `safetyMarginTokens`) instead and it
+compacts at `contextWindow − outputReserveTokens − safetyMarginTokens`: only
+when the next request plus its output would no longer fit. The two forms are
+mutually exclusive in one scope; a `modelPolicies` entry may use either.
+
+Size the reserve from real sessions with `tools/compaction_headroom.py`: it
+prints, per compaction, the tokens in context before and after, % of the
+window, summarizing time and summary size, plus the max and p99 output per
+request and post-compaction file re-reads (`--rereads`).
 
 ## Verified
 

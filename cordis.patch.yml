@@ -3,5 +3,6 @@
       name: dsh-compaction-select
       config:
         maxTokens: 8192
-        thresholdRatio: 0.55
+        outputReserveTokens: 2048
+        safetyMarginTokens: 6144
         compactionRetries: 0
