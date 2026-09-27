@@ -17,6 +17,13 @@ Usage:
 Exit status: 0 = all criteria pass, 1 = a criterion failed,
 2 = incomplete (for example /compact was not run twice after the turn).
 
+The pressure threshold is computed the way lib/index.js resolveCompactSpec
+does: contextWindow comes from the session's last request/context event, and
+the policy (thresholdRatio or outputReserveTokens + safetyMarginTokens, plus a
+matching modelPolicies entry) from the dsh-compaction-select row of the
+session's agent preset as it is on disk NOW. A session recorded under an
+older preset needs the old values passed as flags (--threshold-ratio, ...).
+
 Token prices mirror the dsh-token-meter fixed heuristic (estimate.js,
 dsh 0.1.5-rc.2): ceil(chars / 4) plus 4 per block and 4 per message, with
 lengths in UTF-16 code units like JavaScript. They are the meter's
@@ -34,6 +41,11 @@ import sys
 import zipfile
 
 SESSIONS = pathlib.Path.home() / ".dsh" / "sessions"
+PRESETS = pathlib.Path.home() / ".dsh" / ".agent-presets"
+PLUGIN = "dsh-compaction-select"
+# Mirrors DEFAULT_THRESHOLD_RATIO / DEFAULT_RETAIN_RATIO in lib/index.js.
+DEFAULT_THRESHOLD_RATIO = 0.8
+DEFAULT_RETAIN_RATIO = 0.16
 HEADING = "## Files and Code"
 NOOP_TEXT = "No compactable history yet."
 CHARS_PER_TOKEN = 4
@@ -217,13 +229,87 @@ def scan(header, events, threshold):
             "floor": floor, "turn_end_seq": turn_end_seq, "threshold": threshold}
 
 
+# ---------------------------------------------------------------- trigger
+
+def routed_context(events):
+    """(provider, model, contextWindow) from the last request/context event."""
+    for e in reversed(events):
+        if e["type"] == "request/context":
+            d = e["data"]
+            return d.get("provider"), d.get("model"), d.get("contextWindow")
+    return None, None, None
+
+
+def find_plugin_config(rows):
+    """The config of the first dsh-compaction-select row, searching groups."""
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("name") == PLUGIN and not row.get("disabled"):
+            return row.get("config") or {}
+        if isinstance(row.get("config"), list):
+            found = find_plugin_config(row["config"])
+            if found is not None:
+                return found
+    return None
+
+
+def preset_policy(preset):
+    """Plugin config from ~/.dsh/.agent-presets/<preset>/agent.cordis.yml, or (None, reason)."""
+    path = PRESETS / str(preset) / "agent.cordis.yml"
+    if not path.exists():
+        return None, f"{path} not found"
+    try:
+        import yaml
+    except ImportError:
+        return None, "PyYAML not installed"
+
+    class Loader(yaml.SafeLoader):
+        pass
+    # Cordis rows use `!!js <expr>`; keep the expression text, it is never evaluated here.
+    Loader.add_constructor("tag:yaml.org,2002:js", lambda loader, node: loader.construct_scalar(node))
+    config = find_plugin_config(yaml.load(path.read_text(), Loader=Loader))
+    if config is None:
+        return None, f"no enabled {PLUGIN} row in {path}"
+    return config, str(path)
+
+
+def resolve_threshold(config, provider, model, window):
+    """thresholdTokens and retainTokens as resolveConfig + resolveTargetPolicy + resolveCompactSpec compute them."""
+    override = next((p for p in config.get("modelPolicies") or []
+                     if p.get("provider") == provider and p.get("model") == model), {})
+    if override.get("thresholdRatio") is not None:
+        reserve = None
+    else:
+        source = override if override.get("outputReserveTokens") is not None else config
+        reserve = source.get("outputReserveTokens")
+        margin = source.get("safetyMarginTokens") or 0
+    if reserve is not None:
+        threshold = window - reserve - margin
+        formula = f"{window:,} - outputReserveTokens {reserve:,} - safetyMarginTokens {margin:,}"
+    else:
+        ratio = override.get("thresholdRatio", config.get("thresholdRatio", DEFAULT_THRESHOLD_RATIO))
+        threshold = math.floor(window * ratio)
+        formula = f"floor({window:,} x thresholdRatio {ratio})"
+    if override.get("retainTokens") is not None or override.get("retainRatio") is not None:
+        retain_src = override
+    else:
+        retain_src = config
+    if retain_src.get("retainTokens") is not None:
+        retain = retain_src["retainTokens"]
+    else:
+        retain = math.floor(window * retain_src.get("retainRatio", DEFAULT_RETAIN_RATIO))
+    return threshold, retain, formula
+
+
 # ---------------------------------------------------------------- report
 
 def report(path, header, events, result):
     comps, cmds, floor, threshold = result["compactions"], result["commands"], result["floor"], result["threshold"]
     print(f"session  {header.get('id')}  preset={header.get('agentPreset')}  "
           f"created {clock(header['createdAt']) if 'createdAt' in header else '?'}")
-    print(f"source   {path}  ({len(events)} events)\n")
+    print(f"source   {path}  ({len(events)} events)")
+    print(f"trigger  {result['trigger']}\n")
 
     print("compactions")
     errors = []
@@ -316,12 +402,36 @@ def report(path, header, events, result):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("session", nargs="?", help="session id prefix, session dir, .zstd, .jsonl or .zip")
-    parser.add_argument("--threshold", type=int, default=int(32768 * 0.55),
-                        help="pressure threshold in tokens (default 18022 = 32768 x 0.55)")
+    parser.add_argument("--threshold", type=int, help="pressure threshold in tokens (skips resolution)")
+    parser.add_argument("--context-window", type=int, help="override the session's recorded contextWindow")
+    parser.add_argument("--threshold-ratio", type=float, help="override the preset's policy with this ratio")
+    parser.add_argument("--output-reserve", type=int, help="override the preset's policy with this outputReserveTokens")
+    parser.add_argument("--safety-margin", type=int, help="safetyMarginTokens for --output-reserve (default 0)")
     args = parser.parse_args()
     path = find_session(args.session)
     header, events = load_events(path)
-    sys.exit(report(path, header, events, scan(header, events, args.threshold)))
+
+    if args.threshold is not None:
+        threshold, trigger = args.threshold, f"{args.threshold:,} (--threshold)"
+    else:
+        provider, model, window = routed_context(events)
+        window = args.context_window or window
+        if not window:
+            sys.exit("no request/context contextWindow in this session; pass --context-window or --threshold")
+        if args.threshold_ratio is not None or args.output_reserve is not None:
+            if args.threshold_ratio is not None and args.output_reserve is not None:
+                sys.exit("--threshold-ratio and --output-reserve are mutually exclusive")
+            config, source = ({"thresholdRatio": args.threshold_ratio} if args.threshold_ratio is not None else
+                              {"outputReserveTokens": args.output_reserve, "safetyMarginTokens": args.safety_margin or 0}), "flags"
+        else:
+            config, source = preset_policy(header.get("agentPreset"))
+            if config is None:
+                sys.exit(f"cannot read the compaction policy ({source}); pass --threshold-ratio or --output-reserve")
+        threshold, retain, formula = resolve_threshold(config, provider, model, window)
+        trigger = f"{threshold:,} = {formula}  (retain {retain:,}; policy from {source})"
+    result = scan(header, events, threshold)
+    result["trigger"] = trigger
+    sys.exit(report(path, header, events, result))
 
 
 if __name__ == "__main__":
