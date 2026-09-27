@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Scan a dsh session log and check dsh-compaction-select against the live-test criteria.
 
-Reads every zstd frame of session.v3.jsonl.zstd (or a plain .jsonl, or a
-"Session log" .zip downloaded from the dsh UI), then prints:
+Reads every zstd frame of the session's current log, session.v3.jsonl.zstd
+(dsh 0.1.5) or session.v4.jsonl.zstd (dsh 0.1.7), or a plain .jsonl, or a
+"Session log" .zip downloaded from the dsh UI; $DSH_HOME is honoured. Then prints:
 
   - every compaction (auto/manual) with its diagnostics and checkpoint format
   - every /compact command and its result text
@@ -34,14 +35,22 @@ import datetime
 import io
 import json
 import math
+import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
 import zipfile
 
-SESSIONS = pathlib.Path.home() / ".dsh" / "sessions"
-PRESETS = pathlib.Path.home() / ".dsh" / ".agent-presets"
+DSH_HOME = pathlib.Path(os.environ.get("DSH_HOME") or pathlib.Path.home() / ".dsh").expanduser()
+SESSIONS = DSH_HOME / "sessions"
+# dsh 0.1.5 directory presets; 0.1.7 declares presets as bundle rows instead.
+PRESETS = DSH_HOME / ".agent-presets"
+PROFILES = DSH_HOME / "profiles"
+# One session directory holds one generation file per format version
+# (session.v3.jsonl.zstd, session.v4.jsonl.zstd, ...); the highest is current.
+LOG_GLOB = "session.v*.jsonl*"
 PLUGIN = "dsh-compaction-select"
 # Mirrors DEFAULT_THRESHOLD_RATIO / DEFAULT_RETAIN_RATIO in lib/index.js.
 DEFAULT_THRESHOLD_RATIO = 0.8
@@ -55,22 +64,39 @@ ROLE_OVERHEAD = 4
 
 # ---------------------------------------------------------------- loading
 
+def log_version(path):
+    match = re.search(r"session\.v(\d+)\.jsonl", path.name)
+    return int(match.group(1)) if match else 0
+
+
+def current_log(session_dir):
+    """The highest-version session log in one session directory, or None."""
+    logs = sorted(session_dir.glob(LOG_GLOB), key=log_version)
+    return logs[-1] if logs else None
+
+
 def find_session(arg):
-    """Resolve an argument (or nothing) to a session log path."""
+    """Resolve an argument (or nothing) to a session log path (V3 or V4)."""
     if arg is None:
-        logs = sorted(SESSIONS.glob("*/session-*/session.v3.jsonl.zstd"), key=lambda p: p.stat().st_mtime)
+        logs = [log for d in SESSIONS.glob("*/session-*") if (log := current_log(d))]
         if not logs:
             sys.exit(f"no session logs under {SESSIONS}")
-        return logs[-1]
+        return max(logs, key=lambda p: p.stat().st_mtime)
     path = pathlib.Path(arg).expanduser()
     if path.is_dir():
-        return path / "session.v3.jsonl.zstd"
+        log = current_log(path)
+        if log is None:
+            sys.exit(f"{path}: no session.v*.jsonl* log")
+        return log
     if path.exists():
         return path
-    matches = sorted(SESSIONS.glob(f"*/session-{arg}*/session.v3.jsonl.zstd"))
-    if len(matches) != 1:
-        sys.exit(f"{arg!r}: expected one matching session, found {len(matches)}")
-    return matches[0]
+    dirs = sorted(SESSIONS.glob(f"*/session-{arg}*"))
+    if len(dirs) != 1:
+        sys.exit(f"{arg!r}: expected one matching session under {SESSIONS}, found {len(dirs)}")
+    log = current_log(dirs[0])
+    if log is None:
+        sys.exit(f"{dirs[0]}: no session.v*.jsonl* log")
+    return log
 
 
 def decompress_zstd(raw):
@@ -156,8 +182,11 @@ def message_of(event):
 
 
 def is_checkpoint(event):
+    """V3 marks checkpoints {kind: plugin, plugin: compact}; V4 {kind: compact-checkpoint}."""
     source = event["data"].get("source") or {}
-    return event["type"] == "user/message" and source.get("kind") == "plugin" and source.get("plugin") == "compact"
+    return event["type"] == "user/message" and (
+        source.get("kind") == "compact-checkpoint"
+        or (source.get("kind") == "plugin" and source.get("plugin") == "compact"))
 
 
 # ---------------------------------------------------------------- analysis
@@ -254,24 +283,63 @@ def find_plugin_config(rows):
     return None
 
 
-def preset_policy(preset):
-    """Plugin config from ~/.dsh/.agent-presets/<preset>/agent.cordis.yml, or (None, reason)."""
-    path = PRESETS / str(preset) / "agent.cordis.yml"
-    if not path.exists():
-        return None, f"{path} not found"
-    try:
-        import yaml
-    except ImportError:
-        return None, "PyYAML not installed"
+def load_yaml(path):
+    import yaml
 
     class Loader(yaml.SafeLoader):
         pass
     # Cordis rows use `!!js <expr>`; keep the expression text, it is never evaluated here.
     Loader.add_constructor("tag:yaml.org,2002:js", lambda loader, node: loader.construct_scalar(node))
-    config = find_plugin_config(yaml.load(path.read_text(), Loader=Loader))
-    if config is None:
-        return None, f"no enabled {PLUGIN} row in {path}"
-    return config, str(path)
+    return yaml.load(path.read_text(), Loader=Loader)
+
+
+def bundle_patches():
+    """cordis.patch.yml of every bundle the profiles under DSH_HOME select, in order."""
+    for manifest in sorted(PROFILES.glob("*/package.json")):
+        bundles = (json.loads(manifest.read_text()).get("dsh") or {}).get("profile", {}).get("bundles", [])
+        for name in bundles:
+            package = manifest.parent / "node_modules" / name / "package.json"
+            if not package.exists():
+                continue
+            patch = (json.loads(package.read_text()).get("dsh") or {}).get("bundle", {}).get("patch")
+            if patch and (package.parent / patch).exists():
+                yield package.parent / patch
+
+
+def preset_rows(patch):
+    """(preset id, plugin rows) for each @deepseek-ai/dsh-agent-preset row a bundle patch inserts."""
+    for item in patch or []:
+        for row in (item.get("insert") or [item]) if isinstance(item, dict) else []:
+            config = row.get("config") if isinstance(row, dict) else None
+            if row.get("name") == "@deepseek-ai/dsh-agent-preset" and isinstance(config, dict):
+                yield config.get("id"), config.get("plugins")
+
+
+def preset_policy(preset):
+    """Plugin config for a preset, or (None, reason).
+
+    dsh 0.1.7: the @deepseek-ai/dsh-agent-preset row with config.id == preset
+    in a profile bundle (what dsh loads now). dsh 0.1.5 fallback:
+    ~/.dsh/.agent-presets/<preset>/agent.cordis.yml, which 0.1.7 ignores.
+    """
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        return None, "PyYAML not installed"
+    for patch in bundle_patches():
+        for preset_id, plugins in preset_rows(load_yaml(patch)):
+            if preset_id == preset:
+                config = find_plugin_config(plugins)
+                if config is None:
+                    return None, f"no enabled {PLUGIN} row in preset {preset} ({patch})"
+                return config, f"{patch} (preset {preset})"
+    path = PRESETS / str(preset) / "agent.cordis.yml"
+    if path.exists():
+        config = find_plugin_config(load_yaml(path))
+        if config is None:
+            return None, f"no enabled {PLUGIN} row in {path}"
+        return config, str(path)
+    return None, f"preset {preset!r} not found in any profile bundle under {PROFILES} or in {PRESETS}"
 
 
 def resolve_threshold(config, provider, model, window):
