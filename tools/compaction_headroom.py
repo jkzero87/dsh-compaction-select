@@ -74,6 +74,10 @@ def stop_reason(event):
     return ((source.get("replayState") or {}).get("response") or {}).get("stopReason", "?")
 
 
+def parse_when(text):
+    return int(datetime.datetime.strptime(text, "%Y-%m-%d %H:%M").timestamp() * 1000)
+
+
 def percentile(values, pct):
     """Nearest-rank percentile."""
     ordered = sorted(values)
@@ -128,7 +132,10 @@ def session_cwd(header):
 
 # ---------------------------------------------------------------- analysis
 
-def analyse(header, events, rereads):
+def analyse(header, events, rereads, since=None, until=None):
+    """Replay every event; count only compactions, requests and active time inside [since, until)."""
+    def inside(ms):
+        return (since is None or ms >= since) and (until is None or ms < until)
     window = DEFAULT_WINDOW
     cwd = session_cwd(header)
     last_usage = None          # provider usage of the latest model request
@@ -149,9 +156,10 @@ def analyse(header, events, rereads):
             step_index += 1
         usage = model_usage(e)
         if usage is not None:
-            outputs.append(usage["outputTokens"])
-            reason = stop_reason(e)
-            stops[reason] = stops.get(reason, 0) + 1
+            if inside(e["time"]):
+                outputs.append(usage["outputTokens"])
+                reason = stop_reason(e)
+                stops[reason] = stops.get(reason, 0) + 1
             for comp in comps:
                 if comp["after"] is None and comp["end_time"] is not None:
                     comp["after"] = prompt_tokens(usage)
@@ -170,6 +178,7 @@ def analyse(header, events, rereads):
                     "reads_before": None}
             open_comps[data["compactionId"]] = comp
             comps.append(comp)
+            comp["counted"] = inside(e["time"])
         elif kind == "compaction/summary" and data.get("compactionId") in open_comps:
             comp = open_comps[data["compactionId"]]
             comp["out"] = (data.get("usage") or {}).get("outputTokens")
@@ -200,7 +209,8 @@ def analyse(header, events, rereads):
             comp["rereads"] = count
             comp["reread_paths"] = sorted(hits)
 
-    times = [e["time"] for e in events if "time" in e]
+    comps = [c for c in comps if c["counted"]]
+    times = [e["time"] for e in events if "time" in e and inside(e["time"])]
     span = sum(b - a for a, b in zip(times, times[1:]) if b - a <= IDLE_GAP_MS)
     comp_ms = sum(c["end_time"] - c["start"] for c in comps if c["end_time"] is not None)
     return {"window": window, "comps": comps, "outputs": outputs, "stops": stops,
@@ -247,6 +257,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("sessions", nargs="+", help="session id prefix, session dir, .zstd, .jsonl or .zip")
     parser.add_argument("--rereads", action="store_true", help="count post-compaction re-reads of files")
+    parser.add_argument("--since", type=parse_when, help="count only from this local time, 'YYYY-MM-DD HH:MM'")
+    parser.add_argument("--until", type=parse_when, help="count only before this local time, 'YYYY-MM-DD HH:MM'")
     args = parser.parse_args()
     by_window = {}
     for i, arg in enumerate(args.sessions):
@@ -254,7 +266,9 @@ def main():
             print("\n" + "-" * 100 + "\n")
         path = find_session(arg)
         header, events = load_events(path)
-        result = analyse(header, events, args.rereads)
+        result = analyse(header, events, args.rereads, args.since, args.until)
+        if args.since or args.until:
+            print(f"slice    [{args.since and clock(args.since) or 'start'}, {args.until and clock(args.until) or 'end'})")
         report(path, result, args.rereads)
         total = by_window.setdefault(result["window"], {"outputs": [], "active": 0, "comp": 0, "n": 0})
         total["outputs"] += result["outputs"]
