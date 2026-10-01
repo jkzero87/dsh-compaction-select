@@ -1,6 +1,10 @@
 # dsh-compaction-select
 
-A fork of `@deepseek-ai/dsh-compaction-basic` for a local Qwen3.8-27B (GSQ,
+A context-compaction plugin for the dsh agent harness (`@deepseek-ai/dsh`).
+When a session gets close to the model's context window, compaction replaces
+the oldest history with a written checkpoint so the conversation can go on.
+
+This is a fork of `@deepseek-ai/dsh-compaction-basic` for a local Qwen3.8-27B (GSQ,
 65k window). Each compaction produces one bounded checkpoint. Compared with
 upstream:
 
@@ -15,6 +19,13 @@ upstream:
 
 It's loaded by the `standard-light` preset as `dsh-compaction-select`. After
 any dsh upgrade, follow [UPGRADING.md](UPGRADING.md).
+
+## Install
+
+Clone to `~/dsh-compaction-select`, then run `scripts/link-deps.sh`: it links
+the dsh packages the fork imports from your global dsh install and ends with
+`IMPORT OK`. [UPGRADING.md](UPGRADING.md) walks through the full check,
+including the preset entry and a live test.
 
 ## Trigger
 
@@ -50,3 +61,14 @@ dsh 0.1.5-rc.2, session `2c8676c7` (standard-light, one long read turn, then
 - **Retry caught a tool-call reply:** one summarizer reply was a tool call
   (the model acting as the agent). It was rejected and retried once, and the
   retry produced a good checkpoint.
+
+## Files
+
+| Path | What it is |
+|---|---|
+| `lib/index.js` | The plugin |
+| `cordis.patch.yml` | Default config loaded with the bundle (`maxTokens`, `outputReserveTokens`, `safetyMarginTokens`, ...) |
+| `scripts/link-deps.sh` | Links dsh's bundled packages into `node_modules`; re-run after every dsh upgrade |
+| `tools/check_session.py` | Scans a session log and prints PASS/FAIL for the criteria in "Verified" |
+| `tools/compaction_headroom.py` | Per-compaction headroom report, used to size `outputReserveTokens` |
+| `UPGRADING.md` | Steps after a dsh upgrade, and the checklist for switching the 27B model |
