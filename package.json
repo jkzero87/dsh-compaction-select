@@ -4,6 +4,9 @@
   "description": "Bounded, non-cumulative compaction checkpoints (fork of compaction-basic)",
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'"
+  },
   "files": [
     "lib/index.js",
     "cordis.patch.yml"
