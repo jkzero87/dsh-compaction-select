@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-select",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bounded, non-cumulative compaction checkpoints (fork of compaction-basic)",
   "type": "module",
   "main": "lib/index.js",
