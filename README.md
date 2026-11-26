@@ -1,6 +1,6 @@
 # dsh-compaction-select
 
-A fork of `@deepseek-ai/dsh-compaction-basic` for a local Qwen3.8-27B (GSQ,
+Version 0.1.1. A fork of `@deepseek-ai/dsh-compaction-basic` for a local Qwen3.8-27B (GSQ,
 65k window). Each compaction produces one bounded checkpoint. Compared with
 upstream:
 
@@ -60,8 +60,10 @@ threshold are not traced.
 `npm test` replays five recorded summarizer failures and one recorded success
 from real session logs, read in place from the desktop app's home
 (`DSH_HOME`) and `~/dsh-compare/fixtures` (`DSH_COMPARE_FIXTURES`); a test
-whose log is missing is skipped. They need `node_modules` from
-`scripts/link-deps.sh` plus `zod`, which `dsh-token-meter` imports.
+whose log is missing is skipped. The five failures are `54548ded` seq 95 and
+seq 102, `abf97961` seq 417, `907fd2cd` seq 1172 and `1624f4db` seq 1668
+(`test/fixtures.mjs`). They need `node_modules` from `scripts/link-deps.sh`
+plus `zod`, which `dsh-token-meter` imports.
 
 ## Verified
 
@@ -84,3 +86,23 @@ dsh 0.1.5-rc.2, session `2c8676c7` (standard-light, one long read turn, then
 - **Retry caught a tool-call reply:** one summarizer reply was a tool call
   (the model acting as the agent). It was rejected and retried once, and the
   retry produced a good checkpoint.
+
+## Live validation, 0.1.1
+
+Desktop app, standard-light preset, session `27505c64` (2026-11-26, one 36-minute
+turn), cross-checked against `logs/compaction-select.log`:
+
+| Compaction | Result | Context before → after |
+|---|---|---|
+| 1 (seq 157) | `retry-without-tools` (`rejections=format`), then a clean checkpoint | 60,085 → 28,474 tokens |
+| 2 (seq 351) | clean on the first attempt | 59,072 → 27,983 tokens |
+
+Zero `mechanical` checkpoints and zero failed compactions.
+
+### Known limit
+
+On 2026-11-26 the first compaction of each of the 4 sessions that compacted
+was rejected as `format` and retried; the second compactions passed on the
+first attempt. The retry sends no tool schemas, so the server re-processes
+the prompt: 35.6k–44.8k prompt tokens and 88–104 s per retry in the
+llama-server log. The rejected reply is not traced yet, so its cause is open.
