@@ -3,3 +3,4 @@ node_modules/
 *.bak_*
 *.diff
 __pycache__/
+scratch/

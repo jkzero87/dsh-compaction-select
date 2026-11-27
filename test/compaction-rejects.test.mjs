@@ -14,7 +14,9 @@ import { FAILURES, hasLog, readLog, replay, reply, startOf } from "./fixtures.mj
 
 const FIXTURE = FAILURES.find((fixture) => fixture.name.startsWith("907fd2cd"));
 const REJECT_TEXT = "Next I will read the remaining files and continue the task.";
-const scratch = fs.mkdtempSync(path.join(process.cwd(), "scratch", "compaction-rejects-test-"));
+const scratchRoot = path.join(process.cwd(), "scratch");
+fs.mkdirSync(scratchRoot, { recursive: true });
+const scratch = fs.mkdtempSync(path.join(scratchRoot, "compaction-rejects-test-"));
 const rejectsDir = path.join(scratch, "rejects");
 after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
